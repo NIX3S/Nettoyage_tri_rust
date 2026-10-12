@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "src-tauri",
+]
+
+# Shared release profile: single, small, fast binary.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

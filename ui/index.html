@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>File Toolkit Pro</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <nav class="tabbar" id="tabbar">
+      <button class="tab-btn active" data-tab="comparison">🔀 Comparaison</button>
+      <button class="tab-btn" data-tab="duplicates">🧬 Find Duplicate</button>
+      <button class="tab-btn" data-tab="optimizer">🗜️ Optimizer</button>
+      <button class="tab-btn" data-tab="getall">📦 GetALL</button>
+      <button class="tab-btn" data-tab="sortmedia">🗂️ TriPhotosVideo</button>
+      <button class="tab-btn" data-tab="android">📱 TakePhotoOnPhone</button>
+    </nav>
+
+    <div class="content">
+
+      <!-- ============ COMPARAISON ============ -->
+      <section class="tab-panel active" id="tab-comparison">
+        <div class="card">
+          <h1>Comparaison de dossiers</h1>
+          <p class="subtitle">Compare deux arborescences et montre ce qui manque de chaque côté.</p>
+          <div class="row">
+            <div class="field">
+              <label>Dossier A</label>
+              <input type="text" id="cmpA" placeholder="C:\...\DossierA" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="cmpA" type="button">Parcourir…</button>
+            </div>
+            <div class="field">
+              <label>Dossier B</label>
+              <input type="text" id="cmpB" placeholder="C:\...\DossierB" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="cmpB" type="button">Parcourir…</button>
+            </div>
+          </div>
+          <div class="row" style="margin-top:14px;">
+            <button class="btn btn-primary" id="cmpRun">Comparer</button>
+            <button class="btn btn-secondary" id="cmpApplySelected" disabled>Auto update (sélection)</button>
+          </div>
+
+          <details class="advanced">
+            <summary>Règles avancées d'auto-update</summary>
+            <div class="advanced-body">
+              <p class="subtitle" style="margin:0;">Si le chemin relatif contient un texte donné, force copy ou cut. Sinon, mode par défaut ci-dessous.</p>
+              <div class="row">
+                <div class="field">
+                  <label>Mode par défaut</label>
+                  <select id="cmpDefaultMode"><option value="copy">Copy</option><option value="cut">Cut</option></select>
+                </div>
+              </div>
+              <div id="cmpRulesList"></div>
+              <button class="btn btn-secondary btn-sm" id="cmpAddRule" style="align-self:flex-start;">+ Ajouter une règle</button>
+            </div>
+          </details>
+        </div>
+
+        <div class="card">
+          <div class="section-summary">
+            <span>Uniquement dans A : <b id="cmpCountA">0</b></span>
+            <span>Uniquement dans B : <b id="cmpCountB">0</b></span>
+          </div>
+          <div id="cmpResults"><div class="empty-state">Lance une comparaison pour voir les résultats.</div></div>
+        </div>
+      </section>
+
+      <!-- ============ FIND DUPLICATE ============ -->
+      <section class="tab-panel" id="tab-duplicates">
+        <div class="card">
+          <h1>Find Duplicate</h1>
+          <p class="subtitle">Détecte les fichiers au contenu identique (taille + SHA-256), pas juste au nom.</p>
+          <div class="row">
+            <div class="field">
+              <label>Dossier(s) à scanner (séparés par ;)</label>
+              <input type="text" id="dupRoots" placeholder="C:\Photos;C:\Backup" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="dupRoots" type="button">Parcourir…</button>
+            </div>
+          </div>
+          <div class="row" style="margin-top:14px;">
+            <button class="btn btn-primary" id="dupRun">Scanner</button>
+          </div>
+          <details class="advanced">
+            <summary>Critères avancés</summary>
+            <div class="advanced-body">
+              <div class="row">
+                <div class="field"><label>Taille min (octets)</label><input type="number" id="dupMinSize" value="0" /></div>
+                <div class="field"><label>Extensions (ex: jpg,mp4) — vide = tout</label><input type="text" id="dupExts" /></div>
+                <div class="field"><label>Modifié il y a moins de (jours) — vide = illimité</label><input type="number" id="dupDays" /></div>
+              </div>
+              <label class="chip"><input type="checkbox" id="dupIgnoreEmpty" /> Ignorer les fichiers vides</label>
+            </div>
+          </details>
+        </div>
+
+        <div class="card">
+          <div class="section-summary">
+            <span>Groupes : <b id="dupGroupCount">0</b></span>
+            <span>Espace récupérable : <b id="dupWasted">0 o</b></span>
+          </div>
+          <div id="dupResults"><div class="empty-state">Lance un scan pour voir les doublons.</div></div>
+        </div>
+      </section>
+
+      <!-- ============ OPTIMIZER ============ -->
+      <section class="tab-panel" id="tab-optimizer">
+        <div class="card">
+          <h1>Optimizer</h1>
+          <p class="subtitle">Réduit la taille des images / PDF / vidéos / PPTX. Sans perte par défaut.</p>
+          <div class="row">
+            <div class="field"><label>Dossier ou fichier source</label><input type="text" id="optSource" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="optSource" type="button">Parcourir…</button></div>
+            <div class="field"><label>Type</label>
+              <select id="optKind">
+                <option value="all">Tout</option>
+                <option value="image">Image</option>
+                <option value="video">Vidéo</option>
+                <option value="pdf">PDF</option>
+                <option value="pptx">PPTX</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <label class="chip"><input type="checkbox" id="optInPlace" checked /> Réécrire sur place</label>
+            <div class="field" id="optDestField" style="display:none;"><label>Dossier de destination</label><input type="text" id="optDest" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="optDest" type="button">Parcourir…</button></div>
+          </div>
+          <div class="row" style="margin-top:14px;">
+            <button class="btn btn-primary" id="optRun">Optimiser</button>
+          </div>
+          <details class="advanced">
+            <summary>Mode avec perte</summary>
+            <div class="advanced-body">
+              <label class="chip"><input type="checkbox" id="optLossy" /> Activer la compression avec perte</label>
+              <div class="field"><label>Qualité (0-100)</label><input type="number" id="optQuality" value="80" min="1" max="100" /></div>
+              <label class="chip"><input type="checkbox" id="optKeepBackup" checked /> Garder une copie .bak (sur place uniquement)</label>
+            </div>
+          </details>
+        </div>
+        <div class="card"><div id="optResults"><div class="empty-state">Aucun traitement lancé.</div></div></div>
+      </section>
+
+      <!-- ============ GETALL ============ -->
+      <section class="tab-panel" id="tab-getall">
+        <div class="card">
+          <h1>GetALL</h1>
+          <p class="subtitle">Rassemble des fichiers de plusieurs dossiers vers une seule destination.</p>
+          <div class="row">
+            <div class="field"><label>Dossiers source (séparés par ;)</label><input type="text" id="gaSources" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="gaSources" type="button">Parcourir…</button></div>
+            <div class="field"><label>Dossier de destination</label><input type="text" id="gaDest" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="gaDest" type="button">Parcourir…</button></div>
+          </div>
+          <div class="row">
+            <label class="chip"><input type="checkbox" class="ga-cat" value="image" /> Images</label>
+            <label class="chip"><input type="checkbox" class="ga-cat" value="video" /> Vidéos</label>
+            <label class="chip"><input type="checkbox" class="ga-cat" value="audio" /> Audio</label>
+            <label class="chip"><input type="checkbox" class="ga-cat" value="document" /> Documents</label>
+          </div>
+          <div class="row">
+            <div class="field"><label>Extensions supplémentaires (ex: heic,cr2)</label><input type="text" id="gaExtra" /></div>
+            <div class="field"><label>Mode</label><select id="gaMode"><option value="copy">Copy</option><option value="cut">Cut</option></select></div>
+          </div>
+          <label class="chip"><input type="checkbox" id="gaJson" checked /> Export JSON (position d'origine)</label>
+          <div class="row" style="margin-top:14px;">
+            <button class="btn btn-primary" id="gaRun">Lancer</button>
+          </div>
+        </div>
+        <div class="card"><div id="gaResults"><div class="empty-state">Aucun rassemblement lancé.</div></div></div>
+      </section>
+
+      <!-- ============ TRIPHOTOSVIDEO ============ -->
+      <section class="tab-panel" id="tab-sortmedia">
+        <div class="card">
+          <h1>TriPhotosVideo</h1>
+          <p class="subtitle">Trie photos/vidéos par année/mois via EXIF, sinon date de création. Sans date fiable → dossier NSP.</p>
+          <div class="row">
+            <div class="field"><label>Dossier photos (ou photos+vidéos)</label><input type="text" id="smPhotos" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="smPhotos" type="button">Parcourir…</button></div>
+            <div class="field"><label>Dossier vidéos (optionnel)</label><input type="text" id="smVideos" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="smVideos" type="button">Parcourir…</button></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>Destination</label><input type="text" id="smDest" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="smDest" type="button">Parcourir…</button></div>
+            <div class="field"><label>Mode</label><select id="smMode"><option value="copy">Copy</option><option value="cut">Cut</option></select></div>
+          </div>
+          <div class="row">
+            <label class="chip"><input type="checkbox" id="smDedupe" checked /> Dédoublonnage SHA-256</label>
+            <label class="chip"><input type="checkbox" id="smSeparate" /> Séparer Photos / Videos (sous-dossiers)</label>
+            <div class="field"><label>Préfixe dossier (ex: Trip_)</label><input type="text" id="smPrefix" /></div>
+          </div>
+          <details class="advanced">
+            <summary>Destinations séparées (ex. photos sur E:\, vidéos sur F:\)</summary>
+            <div class="advanced-body">
+              <p class="subtitle" style="margin:0;">Optionnel — si renseigné, remplace "Destination" ci-dessus pour ce type de fichier (peut pointer vers un autre disque).</p>
+              <div class="row">
+                <div class="field"><label>Destination photos</label><input type="text" id="smPhotosDest" />
+                  <button class="btn btn-secondary btn-sm browse-btn" data-target="smPhotosDest" type="button">Parcourir…</button></div>
+                <div class="field"><label>Destination vidéos</label><input type="text" id="smVideosDest" />
+                  <button class="btn btn-secondary btn-sm browse-btn" data-target="smVideosDest" type="button">Parcourir…</button></div>
+              </div>
+            </div>
+          </details>
+          <div class="row" style="margin-top:14px;">
+            <button class="btn btn-primary" id="smRun">Trier</button>
+          </div>
+        </div>
+        <div class="card"><div id="smResults"><div class="empty-state">Aucun tri lancé.</div></div></div>
+      </section>
+
+      <!-- ============ TAKEPHOTOONPHONE ============ -->
+      <section class="tab-panel" id="tab-android">
+        <div class="card">
+          <h1>TakePhotoOnPhone</h1>
+          <p class="subtitle">Récupère les photos/vidéos d'un téléphone Android via ADB.</p>
+          <div class="row">
+            <div class="field"><label>Chemin adb (optionnel — sinon PATH)</label><input type="text" id="adbPath" placeholder="adb" /></div>
+            <button class="btn btn-secondary" id="adbListBtn">Rafraîchir les appareils</button>
+          </div>
+          <div class="row">
+            <div class="field"><label>Appareil</label><select id="adbDevice"></select></div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>Dossiers Android (séparés par ;)</label>
+              <input type="text" id="adbFolders" value="/storage/emulated/0/DCIM/Camera" />
+              <div class="row" style="margin-top:6px;">
+                <button class="btn btn-secondary btn-sm" id="adbFoldersLoad" type="button">📂 Charger depuis un fichier</button>
+                <button class="btn btn-secondary btn-sm" id="adbFoldersSave" type="button">💾 Enregistrer dans un fichier</button>
+              </div>
+            </div>
+            <div class="field"><label>Destination locale</label><input type="text" id="adbDest" />
+              <button class="btn btn-secondary btn-sm browse-btn" data-target="adbDest" type="button">Parcourir…</button></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>Mode</label><select id="adbMode"><option value="copy">Copy</option><option value="cut">Cut</option></select></div>
+            <div class="field">
+              <label>Organisation des dossiers récupérés</label>
+              <select id="adbStructure">
+                <option value="full_tree">Garder l'arborescence complète (sous-dossiers inclus)</option>
+                <option value="requested_folders_only">Seulement les dossiers demandés (pas les sous-dossiers)</option>
+                <option value="flatten">Tout dans un seul dossier (aucun sous-dossier recréé)</option>
+              </select>
+            </div>
+            <label class="chip"><input type="checkbox" id="adbDedupe" /> Dédoublonnage SHA-256 (après récupération)</label>
+          </div>
+          <p class="subtitle" style="margin:0 0 10px;">Ex. "Camera" contient des sous-dossiers Camera1/Camera2/... : "Arborescence complète" les garde tels quels, "Dossiers demandés" ne prend que les fichiers directement dans Camera, "Tout dans un seul dossier" rassemble tout sans recréer aucun sous-dossier.</p>
+          <details class="advanced" id="adbCutRuleDetails">
+            <summary>Règle de coupe (uniquement si Mode = Cut)</summary>
+            <div class="advanced-body">
+              <div class="row">
+                <div class="field">
+                  <label>Ne couper que les fichiers</label>
+                  <select id="adbCutKind">
+                    <option value="all">Tous (dossier entier, rapide)</option>
+                    <option value="on_or_after_date">À partir du (date incluse)</option>
+                    <option value="before_date">Avant le (date exclue)</option>
+                    <option value="older_than_days">Plus vieux que N jours</option>
+                    <option value="newer_than_days">Moins vieux que N jours</option>
+                  </select>
+                </div>
+                <div class="field" id="adbCutDateField" style="display:none;"><label>Date</label><input type="text" id="adbCutDate" placeholder="2026-01-01" /></div>
+                <div class="field" id="adbCutDaysField" style="display:none;"><label>Nombre de jours (ex: 365 = plus d'un an)</label><input type="number" id="adbCutDays" value="365" /></div>
+              </div>
+            </div>
+          </details>
+          <div class="row" style="margin-top:14px;">
+            <button class="btn btn-primary" id="adbRun">Récupérer</button>
+          </div>
+        </div>
+        <div class="card"><div id="adbResults"><div class="empty-state">Aucune récupération lancée.</div></div></div>
+      </section>
+
+    </div>
+
+    <div class="progress-panel" id="progressPanel">
+      <div class="progress-panel-header">
+        <span id="progressLabel">Prêt.</span>
+        <span id="progressPercent">0 %</span>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <ul class="progress-file-list" id="progressFileList"></ul>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

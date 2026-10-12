@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Permissions for File Toolkit Pro's single window: base window/app core commands plus the event system (used for the live progress bar).","local":true,"windows":["main"],"permissions":["core:default","core:event:default"]}}

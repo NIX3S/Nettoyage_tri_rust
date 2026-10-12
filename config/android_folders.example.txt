@@ -1,0 +1,17 @@
+# Dossiers Android à exporter (un par ligne).
+# Les lignes vides et celles commençant par # sont ignorées.
+# Charge ce fichier depuis l'onglet TakePhotoOnPhone ("Charger depuis un
+# fichier"), modifie-le et enregistre-le pour le réutiliser à chaque fois
+# sans tout retaper.
+#
+# Chemin relatif (ex. "DCIM/Camera") ou absolu (ex.
+# "/storage/emulated/0/DCIM/Camera") — les deux marchent : un chemin qui ne
+# commence pas par "/" est automatiquement complété avec
+# "/storage/emulated/0/" devant.
+
+DCIM/Camera
+Download
+Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video
+Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents
+Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images
+Pictures/Screenshots

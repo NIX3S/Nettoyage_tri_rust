@@ -1,0 +1,21 @@
+[package]
+name = "file-toolkit-pro"
+version = "0.1.0"
+description = "File Toolkit Pro — comparison, dedup, optimizer, gather, media sort, phone import"
+edition = "2021"
+default-run = "file-toolkit-pro"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ftp-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "file-toolkit-pro"
+path = "src/main.rs"

@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            args: ""
+            rust_targets: ""
+          - label: macOS Apple Silicon
+            os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust_targets: "aarch64-apple-darwin"
+          - label: macOS Intel
+            os: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust_targets: "x86_64-apple-darwin"
+          - label: Linux x64
+            os: ubuntu-22.04
+            args: ""
+            rust_targets: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Dépendances Linux (WebKitGTK, etc.)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev
+
+      - name: Outils embarqués (qpdf, ffmpeg, adb) - Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/vendor-tools.ps1 -SkipLibreOffice
+
+      - name: Placeholder pour le glob de ressources - macOS/Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p src-tauri/tools/qpdf
+          echo "Sur cette plateforme, qpdf/ffmpeg/adb sont cherchés dans le PATH." > src-tauri/tools/qpdf/README.txt
+
+      - name: Installer la CLI Tauri
+        run: npm install
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "File Toolkit Pro ${{ github.ref_name }}"
+          releaseBody: "Voir les fichiers ci-dessous pour installer l'application (Windows .msi/.exe, macOS .dmg, Linux .deb/.rpm/.AppImage)."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

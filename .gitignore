@@ -1,0 +1,8 @@
+/target
+node_modules
+*.bak
+*.ftp_tmp.*
+getall_index.json
+/downloads
+src-tauri/tools/*
+!src-tauri/tools/README.txt
