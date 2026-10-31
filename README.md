@@ -6,14 +6,12 @@
 
 **Six outils de gestion de fichiers dans une seule application de bureau, légère et sûre.**
 
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
-[![Release](https://github.com/OWNER/REPO/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/release.yml)
+[![CI](https://github.com/NIX3S/Nettoyage_tri_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![Release](https://github.com/NIX3S/Nettoyage_tri_rust/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/release.yml)
 ![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-informational)
 ![Rust](https://img.shields.io/badge/Rust-Tauri%20v2-orange)
 
 </div>
-
-> Remplace `OWNER/REPO` dans les badges par le chemin de ton dépôt GitHub.
 
 File Toolkit Pro regroupe derrière une interface en *glassmorphism* des utilitaires qui existaient sous forme de scripts Python. Une seule application (un exécutable), construite en **Rust + Tauri v2**, pour Windows, macOS et Linux.
 
