@@ -13,6 +13,7 @@
 //!     falling back to PATH, and returns a clear `MissingTool` error rather
 //!     than failing silently if neither is found.
 
+use crate::resume::{JournalEntry, RunSession};
 use crate::fs_utils::{io_err, resolve_tool, resolve_tool_candidates, silent_command, unique_destination};
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,9 @@ pub struct OptimizeReport {
     /// optional tool produces one clear note instead of one error per file.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Files already finished before an interruption and skipped on resume.
+    #[serde(default)]
+    pub resumed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,6 +543,33 @@ fn convert_and_optimize_legacy_office(src: &Path, dest_dir: &Path, quality: &Qua
 
 /// single file) that match `kind`, without doing any work — used up front
 /// so the UI can show a real "N / total" percentage instead of a spinner.
+/// Our own in-progress output (`name.ftp_tmp.ext`): never a source file.
+fn is_ftp_temp(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n.to_string_lossy().contains(".ftp_tmp"))
+}
+
+/// After an interrupted run, deletes the half-written `*.ftp_tmp.*` files it
+/// left next to the originals (the originals themselves are never touched
+/// until a temp file is complete).
+fn cleanup_temp_leftovers(source: &Path) {
+    if !source.is_dir() {
+        return;
+    }
+    for entry in WalkDir::new(source).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() && is_ftp_temp(entry.path()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn mark_if_clean(session: &mut Option<&mut RunSession>, src: &Path, clean: bool) {
+    if clean {
+        if let Some(s) = session.as_deref_mut() {
+            s.mark(JournalEntry::for_path(src));
+        }
+    }
+}
+
 fn list_candidates(source: &Path, kind: MediaKind) -> Vec<PathBuf> {
     let walk = |root: &Path| -> Vec<PathBuf> {
         WalkDir::new(root)
@@ -547,6 +578,7 @@ fn list_candidates(source: &Path, kind: MediaKind) -> Vec<PathBuf> {
             .filter(|e| e.file_type().is_file())
             .map(|e| e.path().to_path_buf())
             .filter(|p| !is_office_lock_file(p))
+            .filter(|p| !is_ftp_temp(p))
             .filter(|p| {
                 let ext = p.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
                 matches_kind(&ext, kind)
@@ -588,9 +620,23 @@ fn retire_original(src: &Path, keep_backup: bool, report: &mut OptimizeReport) {
 
 pub fn run_optimizer(
     opts: &OptimizeOptions,
+    on_progress: impl FnMut(usize, usize, &Path),
+) -> crate::Result<OptimizeReport> {
+    run_optimizer_resumable(opts, None, on_progress)
+}
+
+/// Same as [`run_optimizer`], journaling every finished file into `session`
+/// and skipping the ones a previous (interrupted) run already finished.
+/// Files that ended in an error are not journaled, so a resume retries them.
+pub fn run_optimizer_resumable(
+    opts: &OptimizeOptions,
+    mut session: Option<&mut RunSession>,
     mut on_progress: impl FnMut(usize, usize, &Path),
 ) -> crate::Result<OptimizeReport> {
     let mut report = OptimizeReport::default();
+    if session.as_deref().is_some_and(|s| s.resumed) {
+        cleanup_temp_leftovers(&opts.source);
+    }
     let in_place = opts.destination.is_none();
 
     let caps = Caps::detect(&opts.quality, opts.kind);
@@ -601,6 +647,12 @@ pub fn run_optimizer(
     on_progress(0, total, &opts.source);
 
     for (i, src) in files.into_iter().enumerate() {
+        if session.as_deref().is_some_and(|s| s.is_done(&src)) {
+            report.resumed += 1;
+            on_progress(i + 1, total, &src);
+            continue;
+        }
+        let errs_before = report.errors.len();
         let ext = src.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
 
         // `destination` is always a FOLDER in this app's UI, even for a
@@ -634,6 +686,7 @@ pub fn run_optimizer(
                     src.display()
                 )),
             }
+            mark_if_clean(&mut session, &src, report.errors.len() == errs_before);
             on_progress(i + 1, total, &src);
             continue;
         }
@@ -649,6 +702,7 @@ pub fn run_optimizer(
                 }
                 Err(e) => report.errors.push(format!("{} : compression .eml échouée ({e})", src.display())),
             }
+            mark_if_clean(&mut session, &src, report.errors.len() == errs_before);
             on_progress(i + 1, total, &src);
             continue;
         }
@@ -791,6 +845,7 @@ pub fn run_optimizer(
             }
             Err(e) => report.errors.push(format!("{}: {e}", src.display())),
         }
+        mark_if_clean(&mut session, &src, report.errors.len() == errs_before);
         on_progress(i + 1, total, &src);
     }
 

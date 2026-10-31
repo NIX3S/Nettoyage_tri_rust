@@ -81,6 +81,46 @@ pub fn unique_destination(mut candidate: PathBuf) -> PathBuf {
     }
 }
 
+/// Suffix of the temporary file a copy is written to before being renamed to
+/// its final name. A crash mid-copy therefore never leaves a truncated file
+/// under a real name; leftovers are recognizable and safe to delete.
+pub const PART_SUFFIX: &str = ".ftp_part";
+
+fn part_path(final_dest: &Path) -> PathBuf {
+    let mut name = final_dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(PART_SUFFIX);
+    final_dest.with_file_name(name)
+}
+
+/// Copies `src` to `final_dest` atomically (write to `*.ftp_part`, then rename).
+fn copy_atomic(src: &Path, final_dest: &Path) -> crate::Result<()> {
+    let part = part_path(final_dest);
+    if let Err(e) = std::fs::copy(src, &part) {
+        let _ = std::fs::remove_file(&part);
+        return Err(io_err(src)(e));
+    }
+    if let Err(e) = std::fs::rename(&part, final_dest) {
+        let _ = std::fs::remove_file(&part);
+        return Err(io_err(final_dest)(e));
+    }
+    Ok(())
+}
+
+/// Deletes `*.ftp_part` leftovers (from an interrupted copy) under `root`.
+/// Only files carrying our own suffix are touched.
+pub fn cleanup_part_files(root: &Path) -> usize {
+    let mut removed = 0;
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file()
+            && entry.file_name().to_string_lossy().ends_with(PART_SUFFIX)
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Copy or move a single file, creating parent directories as needed and
 /// avoiding collisions via `unique_destination`. Returns the final path used.
 pub fn transfer_file(
@@ -93,13 +133,12 @@ pub fn transfer_file(
     }
     let final_dest = unique_destination(dest.to_path_buf());
     match mode {
-        crate::TransferMode::Copy => {
-            std::fs::copy(src, &final_dest).map_err(io_err(src))?;
-        }
+        crate::TransferMode::Copy => copy_atomic(src, &final_dest)?,
         crate::TransferMode::Cut => {
-            // Cross-device moves can fail with `std::fs::rename`; fall back to copy+delete.
+            // Cross-device moves can fail with `std::fs::rename`; fall back to
+            // atomic copy, and only then delete the source.
             if std::fs::rename(src, &final_dest).is_err() {
-                std::fs::copy(src, &final_dest).map_err(io_err(src))?;
+                copy_atomic(src, &final_dest)?;
                 std::fs::remove_file(src).map_err(io_err(src))?;
             }
         }

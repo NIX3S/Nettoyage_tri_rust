@@ -6,12 +6,14 @@
 
 **Six outils de gestion de fichiers dans une seule application de bureau, légère et sûre.**
 
-[![CI](https://github.com/NIX3S/Nettoyage_tri_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
-[![Release](https://github.com/NIX3S/Nettoyage_tri_rust/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/release.yml)
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml)
+[![Release](https://github.com/OWNER/REPO/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/release.yml)
 ![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-informational)
 ![Rust](https://img.shields.io/badge/Rust-Tauri%20v2-orange)
 
 </div>
+
+> Remplace `OWNER/REPO` dans les badges par le chemin de ton dépôt GitHub.
 
 File Toolkit Pro regroupe derrière une interface en *glassmorphism* des utilitaires qui existaient sous forme de scripts Python. Une seule application (un exécutable), construite en **Rust + Tauri v2**, pour Windows, macOS et Linux.
 
@@ -43,7 +45,7 @@ File Toolkit Pro regroupe derrière une interface en *glassmorphism* des utilita
 Compare deux arborescences A et B **par chemin relatif** (pas par contenu : voir Find Duplicate). Pour chaque fichier présent d'un seul côté : ouvrir l'emplacement, retirer de la vue (sans toucher au disque) ou **Auto update** (copie ou coupe vers l'autre arborescence en conservant la structure). Sélection multiple et actions par lot. Des [règles conditionnelles](#règles-dauto-update) permettent de couper certains chemins et de copier le reste.
 
 ### 🧬 Find Duplicate
-Détection par **contenu réel** (taille identique, puis SHA-256), pas par nom. Les doublons sont regroupés ; tu choisis quel fichier garder par groupe, les autres partent à la **corbeille** après confirmation. Filtres : taille minimale, extensions, ancienneté maximale. Un groupe peut être masqué sans être traité.
+Détection par **contenu réel** (taille identique, puis SHA-256), pas par nom. Les doublons sont regroupés ; tu choisis quel fichier garder par groupe, les autres partent à la **corbeille** après confirmation. Filtres : taille minimale, extensions, ancienneté maximale. Un groupe peut être masqué sans être traité. Le bouton **« Tout valider »** applique d'un coup, à tous les groupes affichés, le choix « Garder » courant (le premier fichier par défaut) et envoie tous les autres à la corbeille, après une seule confirmation qui récapitule le nombre de fichiers et l'espace libéré.
 
 ### 🗜️ Optimizer
 Source : dossier ou fichier unique. Destination : un autre dossier, ou **réécriture sur place** (`.bak` en option). **Sans perte par défaut.**
@@ -80,6 +82,21 @@ Récupère des fichiers d'un téléphone Android via **ADB** : détection des ap
 - **Tout dans un seul dossier** : tous les fichiers, sous-dossiers inclus, à plat dans une seule destination.
 
 **Règle de coupe** (mode Cut uniquement) : *Tout* (exactement ce qui a été récupéré), *À partir du / Avant le* une date, ou *Plus vieux / moins vieux que N jours* (ex. libérer les photos de plus d'un an). **Dédoublonnage SHA-256** optionnel après le transfert. La liste des dossiers peut être chargée et enregistrée dans un [fichier texte](#liste-de-dossiers-android).
+
+### 🛟 Reprise après crash
+
+Case **« Reprise après crash »** en haut à droite (activée par défaut). Si l'application plante ou est fermée en pleine opération, elle le signale au prochain lancement par un bandeau **Reprendre / Ignorer**.
+
+| Onglet | Ce qui est mémorisé | À la reprise |
+|---|---|---|
+| Find Duplicate | Les hachages SHA-256 déjà calculés (taille + date de modification vérifiées) | Le scan repart presque instantanément ; des fichiers modifiés entre-temps sont re-hachés |
+| Optimizer | Chaque fichier terminé | Les fichiers déjà traités sont ignorés, ceux en erreur sont retentés ; les sorties temporaires `*.ftp_tmp.*` laissées par le plantage sont supprimées |
+| GetALL | Chaque fichier rassemblé et sa destination | Fichiers déjà copiés/coupés ignorés et conservés dans le rapport et l'index JSON, y compris en mode Cut |
+| TriPhotosVideo | Chaque fichier, sa destination et son hash | Idem, et le dédoublonnage reconnaît aussi les doublons de fichiers triés avant le plantage |
+
+- Les copies passent désormais par un fichier `*.ftp_part` renommé une fois complet : un plantage ne laisse jamais un fichier tronqué sous un vrai nom.
+- Les données de reprise sont dans le dossier de données de l'application (sous-dossier `recovery`) et sont effacées dès qu'une opération se termine normalement. Le cache de hachages contient des chemins de fichiers ; décoche la case pour ne plus rien enregistrer.
+- Comparaison (lecture seule et rapide) et TakePhotoOnPhone ne sont pas concernés pour l'instant.
 
 ## Installation
 
@@ -221,7 +238,7 @@ Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images
 ```text
 Cargo.toml              workspace Rust
 core/                   ftp-core : logique pure, testée (comparison, duplicates, getall,
-                        sort_media, optimizer, android, fs_utils)
+                        sort_media, optimizer, android, resume, fs_utils)
 src-tauri/              application Tauri v2 (commandes, build.rs, tauri.conf.json,
                         capabilities, icônes, tools/)
 ui/                     interface (HTML / CSS / JS sans framework)
@@ -241,7 +258,7 @@ config/                 exemples de configuration
 cargo test -p ftp-core
 ```
 
-Couvre la comparaison et l'auto-update, la détection de doublons, GetALL et le hachage. Lancés automatiquement par la CI sur les trois OS.
+Couvre la comparaison et l'auto-update, la détection de doublons (dont le cache de hachages), GetALL, le tri, l'Optimizer (détection de format) et la reprise après crash. Lancés automatiquement par la CI sur les trois OS.
 
 ## Pistes d'amélioration
 

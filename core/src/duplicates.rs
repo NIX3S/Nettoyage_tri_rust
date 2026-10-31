@@ -7,6 +7,7 @@
 //!   2. SHA-256 only within same-size groups, then group by (size, hash).
 
 use crate::hash::sha256_file;
+use crate::resume::{mtime_millis, HashCache};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -75,6 +76,19 @@ fn passes_filters(path: &Path, size: u64, opts: &DuplicateScanOptions) -> bool {
 pub fn find_duplicates(
     roots: &[PathBuf],
     opts: &DuplicateScanOptions,
+    on_progress: impl FnMut(usize, usize),
+) -> crate::Result<Vec<DuplicateGroup>> {
+    find_duplicates_cached(roots, opts, None, on_progress)
+}
+
+/// Same as [`find_duplicates`], with an optional persistent hash cache: hashes
+/// already computed for an unchanged file (same path, size and mtime) are
+/// reused, and every new hash is saved right after each chunk — so a scan
+/// interrupted by a crash resumes almost instantly where it stopped.
+pub fn find_duplicates_cached(
+    roots: &[PathBuf],
+    opts: &DuplicateScanOptions,
+    mut cache: Option<&mut HashCache>,
     mut on_progress: impl FnMut(usize, usize),
 ) -> crate::Result<Vec<DuplicateGroup>> {
     // Phase 1: group by size.
@@ -117,15 +131,32 @@ pub fn find_duplicates(
     let mut hashed: Vec<(u64, String, PathBuf)> = Vec::with_capacity(total);
     let mut done = 0usize;
     for chunk in candidates.chunks(CHUNK) {
-        let chunk_hashed: Vec<(u64, String, PathBuf)> = chunk
-            .par_iter()
-            .filter_map(|path| {
-                let size = std::fs::metadata(path).ok()?.len();
-                let digest = sha256_file(path).ok()?;
-                Some((size, digest, path.clone()))
+        // Split the chunk into cache hits and files that still need hashing.
+        let mut misses: Vec<(PathBuf, u64, i64)> = Vec::new();
+        for path in chunk {
+            let Ok(meta) = std::fs::metadata(path) else { continue };
+            let (size, mtime) = (meta.len(), mtime_millis(&meta));
+            match cache.as_deref().and_then(|c| c.get(path, size, mtime)) {
+                Some(hash) => hashed.push((size, hash.to_string(), path.clone())),
+                None => misses.push((path.clone(), size, mtime)),
+            }
+        }
+        let computed: Vec<(u64, i64, String, PathBuf)> = misses
+            .into_par_iter()
+            .filter_map(|(path, size, mtime)| {
+                let digest = sha256_file(&path).ok()?;
+                Some((size, mtime, digest, path))
             })
             .collect();
-        hashed.extend(chunk_hashed);
+        for (size, mtime, digest, path) in computed {
+            if let Some(c) = cache.as_deref_mut() {
+                c.insert(&path, size, mtime, &digest);
+            }
+            hashed.push((size, digest, path));
+        }
+        if let Some(c) = cache.as_deref_mut() {
+            c.flush();
+        }
         done += chunk.len();
         on_progress(done.min(total), total);
     }
@@ -203,5 +234,30 @@ mod tests {
         let opts = DuplicateScanOptions { min_size: 1024, ..Default::default() };
         let groups = find_duplicates(&[root.to_path_buf()], &opts, |_, _| {}).unwrap();
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn cached_rescan_reuses_hashes_and_still_detects_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"same").unwrap();
+        std::fs::write(root.join("b.txt"), b"same").unwrap();
+        let cache_dir = dir.path().join("cache");
+
+        let mut cache = HashCache::open(&cache_dir);
+        let g = find_duplicates_cached(&[root.clone()], &DuplicateScanOptions::default(), Some(&mut cache), |_, _| {}).unwrap();
+        assert_eq!(g.len(), 1);
+        assert_eq!(cache.len(), 2);
+        drop(cache);
+
+        // Second scan (new process): hashes come from disk...
+        let mut cache = HashCache::open(&cache_dir);
+        assert_eq!(cache.len(), 2);
+        // ...and a modified file (same size, new content/mtime) is re-hashed.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(root.join("b.txt"), b"diff").unwrap();
+        let g = find_duplicates_cached(&[root], &DuplicateScanOptions::default(), Some(&mut cache), |_, _| {}).unwrap();
+        assert!(g.is_empty());
     }
 }

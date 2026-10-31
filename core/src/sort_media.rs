@@ -3,7 +3,8 @@
 //! (Non Spécifié) bucket for anything we genuinely can't date. Ported and
 //! generalized from tri.py.
 
-use crate::fs_utils::transfer_file;
+use crate::fs_utils::{cleanup_part_files, transfer_file};
+use crate::resume::{JournalEntry, RunSession};
 use crate::hash::sha256_file;
 use crate::TransferMode;
 use chrono::{DateTime, Local, NaiveDateTime};
@@ -47,6 +48,9 @@ pub struct SortMediaReport {
     pub duplicates_skipped: usize,
     pub unclassified: usize,
     pub errors: Vec<String>,
+    /// Files already handled before an interruption (included in the counts).
+    #[serde(default)]
+    pub resumed: usize,
 }
 
 fn extract_exif_date(path: &Path) -> Option<NaiveDateTime> {
@@ -111,10 +115,46 @@ fn is_relevant_file(path: &Path, treat_as_photo_source: bool, both_sources_given
 
 pub fn run_sort_media(
     opts: &SortMediaOptions,
+    on_progress: impl FnMut(usize, usize, &Path),
+) -> crate::Result<SortMediaReport> {
+    run_sort_media_resumable(opts, None, on_progress)
+}
+
+/// Same as [`run_sort_media`], with crash recovery: finished files are
+/// journaled (with their destination and hash), so a resumed run skips them,
+/// restores the dedup hash set and rebuilds the report totals.
+pub fn run_sort_media_resumable(
+    opts: &SortMediaOptions,
+    mut session: Option<&mut RunSession>,
     mut on_progress: impl FnMut(usize, usize, &Path),
 ) -> crate::Result<SortMediaReport> {
     let mut report = SortMediaReport::default();
     let mut seen_hashes: HashSet<String> = HashSet::new();
+    if let Some(sess) = session.as_deref() {
+        if sess.resumed {
+            for root in [Some(&opts.destination), opts.photos_destination.as_ref(), opts.videos_destination.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                cleanup_part_files(root);
+            }
+            for entry in sess.done.values() {
+                if let Some(h) = &entry.h {
+                    seen_hashes.insert(h.clone());
+                }
+                if entry.dup {
+                    report.duplicates_skipped += 1;
+                }
+                if entry.u {
+                    report.unclassified += 1;
+                }
+                if let Some(d) = &entry.d {
+                    report.moved.push(PathBuf::from(d));
+                }
+            }
+            report.resumed = sess.done.len();
+        }
+    }
     let sources = sources_for(opts);
     let both_given = opts.videos_source.is_some();
 
@@ -148,16 +188,30 @@ pub fn run_sort_media(
                 continue;
             };
 
+            if session.as_deref().is_some_and(|s| s.is_done(path)) {
+                count += 1;
+                on_progress(count, total, path);
+                continue;
+            }
+
+            let mut file_hash: Option<String> = None;
             if opts.dedupe_by_hash {
                 match sha256_file(path) {
                     Ok(h) if seen_hashes.contains(&h) => {
                         report.duplicates_skipped += 1;
+                        if let Some(s) = session.as_deref_mut() {
+                            let mut entry = JournalEntry::for_path(path);
+                            entry.dup = true;
+                            entry.h = Some(h);
+                            s.mark(entry);
+                        }
                         count += 1;
                         on_progress(count, total, path);
                         continue;
                     }
                     Ok(h) => {
-                        seen_hashes.insert(h);
+                        seen_hashes.insert(h.clone());
+                        file_hash = Some(h);
                     }
                     Err(e) => {
                         report.errors.push(format!("{}: {e}", path.display()));
@@ -181,6 +235,7 @@ pub fn run_sort_media(
                 _ => opts.destination.clone(),
             };
 
+            let mut unclassified_here = false;
             let target_dir = match date {
                 Some(d) => {
                     let year = format!("{}{}", opts.folder_prefix, d.format("%Y"));
@@ -189,13 +244,23 @@ pub fn run_sort_media(
                 }
                 None => {
                     report.unclassified += 1;
+                    unclassified_here = true;
                     media_root.join(NSP_FOLDER)
                 }
             };
 
             let dest = target_dir.join(path.file_name().unwrap_or_default());
             match transfer_file(path, &dest, opts.mode) {
-                Ok(final_dest) => report.moved.push(final_dest),
+                Ok(final_dest) => {
+                    if let Some(s) = session.as_deref_mut() {
+                        let mut entry = JournalEntry::for_path(path);
+                        entry.d = Some(final_dest.to_string_lossy().to_string());
+                        entry.h = file_hash.take();
+                        entry.u = unclassified_here;
+                        s.mark(entry);
+                    }
+                    report.moved.push(final_dest);
+                }
                 Err(e) => report.errors.push(format!("{}: {e}", path.display())),
             }
             count += 1;
@@ -204,4 +269,49 @@ pub fn run_sort_media(
     }
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_restores_dedup_hashes_so_duplicates_across_the_crash_are_still_caught() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dest = dir.path().join("out");
+        let rec = dir.path().join("rec");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.jpg"), b"same-bytes").unwrap();
+        std::fs::write(src.join("b.jpg"), b"same-bytes").unwrap(); // duplicate of a.jpg
+
+        let opts = SortMediaOptions {
+            photos_source: src.clone(),
+            videos_source: None,
+            destination: dest.clone(),
+            photos_destination: None,
+            videos_destination: None,
+            mode: TransferMode::Copy,
+            dedupe_by_hash: true,
+            separate_photos_videos: false,
+            folder_prefix: String::new(),
+        };
+        let params = serde_json::to_value(&opts).unwrap();
+
+        // Crash state: a.jpg already filed (hash journaled), b.jpg not yet seen.
+        let mut s = RunSession::begin(&rec, "sort_media", &params, false).unwrap();
+        let mut e = JournalEntry::for_path(&src.join("a.jpg"));
+        e.d = Some(dest.join("2024/01/a.jpg").to_string_lossy().to_string());
+        e.h = Some(crate::hash::sha256_file(&src.join("a.jpg")).unwrap());
+        s.mark(e);
+        drop(s);
+
+        let mut s = RunSession::begin(&rec, "sort_media", &params, true).unwrap();
+        let report = run_sort_media_resumable(&opts, Some(&mut s), |_, _, _| {}).unwrap();
+        s.finish();
+
+        assert_eq!(report.resumed, 1);
+        assert_eq!(report.duplicates_skipped, 1, "b.jpg must be recognized as a duplicate of the pre-crash a.jpg");
+        assert_eq!(report.moved.len(), 1); // only the restored a.jpg entry
+    }
 }

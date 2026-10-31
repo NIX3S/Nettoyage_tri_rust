@@ -22,11 +22,13 @@ use ftp_core::comparison::{self, AutoUpdateConfig, ComparisonResult, FileEntry};
 use ftp_core::duplicates::{self, DuplicateGroup, DuplicateScanOptions};
 use ftp_core::getall::{self, GetAllOptions, GetAllReport};
 use ftp_core::optimizer::{self, OptimizeOptions, OptimizeReport};
+use ftp_core::resume::{self, HashCache, RunSession, UnfinishedRun};
 use ftp_core::sort_media::{self, SortMediaOptions, SortMediaReport};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use tauri::{Emitter, State, WebviewWindow};
+use tauri::{Emitter, Manager, State, WebviewWindow};
 
 pub struct AppState {
     pub adb_path: String,
@@ -95,6 +97,66 @@ impl ProgressThrottle {
             false
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Crash recovery (see ftp_core::resume)
+// ---------------------------------------------------------------------
+
+/// "Reprise après crash" setting. On by default; the UI syncs it at startup
+/// from its saved preference.
+static RESUME_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Folder holding recovery journals and the hash cache, inside the app's
+/// own data directory. `None` (-> no recovery, everything else works) if it
+/// can't be determined or the feature is switched off.
+fn recovery_dir(window: &WebviewWindow) -> Option<PathBuf> {
+    if !RESUME_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    window.app_handle().path().app_data_dir().ok().map(|d| d.join("recovery"))
+}
+
+fn begin_session<T: Serialize>(
+    dir: &Option<PathBuf>,
+    tab: &str,
+    params: &T,
+    resume: bool,
+) -> Option<RunSession> {
+    let dir = dir.as_ref()?;
+    let value = serde_json::to_value(params).ok()?;
+    RunSession::begin(dir, tab, &value, resume)
+}
+
+#[tauri::command]
+pub fn set_resume_enabled_cmd(enabled: bool) {
+    RESUME_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn list_unfinished_runs_cmd(window: WebviewWindow) -> Vec<UnfinishedRun> {
+    match window.app_handle().path().app_data_dir() {
+        Ok(d) => resume::list_unfinished(&d.join("recovery")),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[tauri::command]
+pub fn discard_unfinished_run_cmd(window: WebviewWindow, tab: String) {
+    if let Ok(d) = window.app_handle().path().app_data_dir() {
+        resume::discard(&d.join("recovery"), &tab);
+    }
+}
+
+/// Deletes the saved file hashes (they contain file paths).
+#[tauri::command]
+pub fn clear_hash_cache_cmd(window: WebviewWindow) -> Result<(), String> {
+    let d = window.app_handle().path().app_data_dir().map_err(to_err)?;
+    let f = d.join("recovery").join("hashcache.jsonl");
+    if f.exists() {
+        std::fs::remove_file(f).map_err(to_err)?;
+    }
+    Ok(())
 }
 
 fn to_err<E: std::fmt::Display>(e: E) -> String {
@@ -193,15 +255,24 @@ pub async fn find_duplicates_cmd(
     roots: Vec<String>,
     options: DuplicateScanOptions,
 ) -> Result<Vec<DuplicateGroup>, String> {
+    let dir = recovery_dir(&window);
     run_blocking(move || {
-        let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
+        let roots_buf: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+        // Marker (so an interrupted scan is offered for resume at next launch)
+        // + persistent hash cache (so the resumed scan skips finished hashing).
+        let session = begin_session(&dir, "duplicates", &serde_json::json!({ "roots": roots, "options": options }), false);
+        let mut cache = dir.as_ref().map(|d| HashCache::open(d));
         let mut throttle = ProgressThrottle::new();
-        duplicates::find_duplicates(&roots, &options, |done, total| {
+        let result = duplicates::find_duplicates_cached(&roots_buf, &options, cache.as_mut(), |done, total| {
             if throttle.allow(done, total) {
                 emit_progress(&window, "duplicates", done, total, None);
             }
         })
-        .map_err(to_err)
+        .map_err(to_err);
+        if let Some(s) = session {
+            s.finish();
+        }
+        result
     })
     .await?
 }
@@ -223,15 +294,25 @@ pub async fn delete_duplicates_cmd(paths: Vec<String>) -> Result<Vec<(String, Re
 // ---------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn run_optimizer_cmd(window: WebviewWindow, options: OptimizeOptions) -> Result<OptimizeReport, String> {
+pub async fn run_optimizer_cmd(
+    window: WebviewWindow,
+    options: OptimizeOptions,
+    resume: Option<bool>,
+) -> Result<OptimizeReport, String> {
+    let dir = recovery_dir(&window);
     run_blocking(move || {
+        let mut session = begin_session(&dir, "optimizer", &options, resume.unwrap_or(false));
         let mut throttle = ProgressThrottle::new();
-        optimizer::run_optimizer(&options, |done, total, path| {
+        let result = optimizer::run_optimizer_resumable(&options, session.as_mut(), |done, total, path| {
             if throttle.allow(done, total) {
                 emit_progress(&window, "optimizer", done, total, Some(path.display().to_string()));
             }
         })
-        .map_err(to_err)
+        .map_err(to_err);
+        if let Some(s) = session {
+            s.finish();
+        }
+        result
     })
     .await?
 }
@@ -241,15 +322,25 @@ pub async fn run_optimizer_cmd(window: WebviewWindow, options: OptimizeOptions) 
 // ---------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn run_getall_cmd(window: WebviewWindow, options: GetAllOptions) -> Result<GetAllReport, String> {
+pub async fn run_getall_cmd(
+    window: WebviewWindow,
+    options: GetAllOptions,
+    resume: Option<bool>,
+) -> Result<GetAllReport, String> {
+    let dir = recovery_dir(&window);
     run_blocking(move || {
+        let mut session = begin_session(&dir, "getall", &options, resume.unwrap_or(false));
         let mut throttle = ProgressThrottle::new();
-        getall::run_getall(&options, |done, total, path| {
+        let result = getall::run_getall_resumable(&options, session.as_mut(), |done, total, path| {
             if throttle.allow(done, total) {
                 emit_progress(&window, "getall", done, total, Some(path.display().to_string()));
             }
         })
-        .map_err(to_err)
+        .map_err(to_err);
+        if let Some(s) = session {
+            s.finish();
+        }
+        result
     })
     .await?
 }
@@ -259,15 +350,25 @@ pub async fn run_getall_cmd(window: WebviewWindow, options: GetAllOptions) -> Re
 // ---------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn run_sort_media_cmd(window: WebviewWindow, options: SortMediaOptions) -> Result<SortMediaReport, String> {
+pub async fn run_sort_media_cmd(
+    window: WebviewWindow,
+    options: SortMediaOptions,
+    resume: Option<bool>,
+) -> Result<SortMediaReport, String> {
+    let dir = recovery_dir(&window);
     run_blocking(move || {
+        let mut session = begin_session(&dir, "sort_media", &options, resume.unwrap_or(false));
         let mut throttle = ProgressThrottle::new();
-        sort_media::run_sort_media(&options, |done, total, path| {
+        let result = sort_media::run_sort_media_resumable(&options, session.as_mut(), |done, total, path| {
             if throttle.allow(done, total) {
                 emit_progress(&window, "sort_media", done, total, Some(path.display().to_string()));
             }
         })
-        .map_err(to_err)
+        .map_err(to_err);
+        if let Some(s) = session {
+            s.finish();
+        }
+        result
     })
     .await?
 }

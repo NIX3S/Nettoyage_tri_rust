@@ -37,6 +37,10 @@ fn main() {
             commands::set_adb_path_cmd,
             commands::list_android_devices_cmd,
             commands::run_photo_pull_cmd,
+            commands::set_resume_enabled_cmd,
+            commands::list_unfinished_runs_cmd,
+            commands::discard_unfinished_run_cmd,
+            commands::clear_hash_cache_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running File Toolkit Pro");

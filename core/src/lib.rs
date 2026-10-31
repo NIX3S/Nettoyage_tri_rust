@@ -13,6 +13,7 @@ pub mod fs_utils;
 pub mod getall;
 pub mod hash;
 pub mod optimizer;
+pub mod resume;
 pub mod sort_media;
 
 pub use fs_utils::FtpError;

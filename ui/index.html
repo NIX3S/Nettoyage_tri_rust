@@ -14,7 +14,13 @@
       <button class="tab-btn" data-tab="getall">📦 GetALL</button>
       <button class="tab-btn" data-tab="sortmedia">🗂️ TriPhotosVideo</button>
       <button class="tab-btn" data-tab="android">📱 TakePhotoOnPhone</button>
+      <label class="resume-toggle" title="Mémorise l'avancement des longues opérations pour pouvoir les reprendre après un plantage ou une fermeture inattendue.">
+        <input type="checkbox" id="resumeEnabled" checked />
+        🛟 Reprise après crash
+      </label>
     </nav>
+
+    <div class="resume-banner" id="resumeBanner" style="display:none;"></div>
 
     <div class="content">
 
@@ -97,6 +103,10 @@
           <div class="section-summary">
             <span>Groupes : <b id="dupGroupCount">0</b></span>
             <span>Espace récupérable : <b id="dupWasted">0 o</b></span>
+          </div>
+          <div class="row" id="dupBulkBar" style="margin:10px 0; display:none; justify-content:space-between;">
+            <span class="subtitle">Dans chaque groupe, le fichier coché « Garder » est conservé.</span>
+            <button class="btn btn-danger" id="dupDeleteAll">🗑️ Tout valider : supprimer tous les autres (corbeille)</button>
           </div>
           <div id="dupResults"><div class="empty-state">Lance un scan pour voir les doublons.</div></div>
         </div>

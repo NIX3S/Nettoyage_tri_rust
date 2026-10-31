@@ -255,6 +255,7 @@ function renderDuplicates() {
   const wasted = lastDuplicates.reduce((sum, g) => sum + g.size * (g.paths.length - 1), 0);
   document.getElementById("dupWasted").textContent = humanSize(wasted);
 
+  document.getElementById("dupBulkBar").style.display = lastDuplicates.length ? "flex" : "none";
   if (!lastDuplicates.length) {
     document.getElementById("dupResults").innerHTML = `<p class="empty-state">Aucun doublon trouvé.</p>`;
     return;
@@ -291,8 +292,41 @@ document.getElementById("dupRun").addEventListener("click", async () => {
     extensions: splitList(document.getElementById("dupExts").value.replace(/;/g, ",")).flatMap((s) => s.split(",")).map((s) => s.trim()).filter(Boolean),
     modified_within_days: document.getElementById("dupDays").value ? Number(document.getElementById("dupDays").value) : null,
   };
+  await runDuplicatesScan(roots, options);
+});
+
+async function runDuplicatesScan(roots, options) {
   lastDuplicates = await runTask("Scan des doublons", () => invoke("find_duplicates_cmd", { roots, options }));
   renderDuplicates();
+}
+
+// "Tout valider" : applique d'un coup, pour CHAQUE groupe affiché, le choix
+// « Garder » courant (par défaut le 1er fichier) et envoie tous les autres à
+// la corbeille. Une seule confirmation, récapitulatif chiffré avant d'agir.
+document.getElementById("dupDeleteAll").addEventListener("click", async () => {
+  const plan = lastDuplicates.map((g, gi) => {
+    const checked = document.querySelector(`input[name="keep-${gi}"]:checked`);
+    const keepIdx = checked ? Number(checked.value) : 0;
+    return { gi, keep: g.paths[keepIdx], remove: g.paths.filter((_, i) => i !== keepIdx), size: g.size };
+  });
+  const toDelete = plan.flatMap((x) => x.remove);
+  if (!toDelete.length) return;
+  const freed = plan.reduce((sum, x) => sum + x.size * x.remove.length, 0);
+  if (!confirm(
+    `Envoyer ${toDelete.length} fichier(s) à la corbeille, dans ${plan.length} groupe(s) ?\n` +
+    `Espace libéré : ${humanSize(freed)}.\n\n` +
+    `Dans chaque groupe, le fichier coché « Garder » est conservé.\nVérifie tes choix avant de confirmer.`
+  )) return;
+
+  const results = await runTask("Suppression de tous les doublons", () => invoke("delete_duplicates_cmd", { paths: toDelete }));
+  const failed = new Map(results.filter(([, r]) => r && r.Err !== undefined).map(([p, r]) => [p, r.Err]));
+  // Un groupe disparaît seulement si tous ses fichiers à supprimer l'ont été.
+  lastDuplicates = lastDuplicates.filter((_, gi) => plan[gi].remove.some((p) => failed.has(p)));
+  renderDuplicates();
+  if (failed.size) {
+    alert(`${toDelete.length - failed.size} fichier(s) envoyé(s) à la corbeille, ${failed.size} échec(s) (les groupes concernés restent affichés) :\n` +
+      [...failed].slice(0, 10).map(([p, e]) => `${p} : ${e}`).join("\n"));
+  }
 });
 
 document.getElementById("dupResults").addEventListener("click", async (e) => {
@@ -335,10 +369,15 @@ document.getElementById("optRun").addEventListener("click", async () => {
     quality: lossy ? { Lossy: Number(document.getElementById("optQuality").value) } : "Lossless",
     keep_backup: document.getElementById("optKeepBackup").checked,
   };
-  const report = await runTask("Optimisation", () => invoke("run_optimizer_cmd", { options }));
+  await runOptimizer(options, false);
+});
+
+async function runOptimizer(options, resume) {
+  const report = await runTask(resume ? "Reprise de l'optimisation" : "Optimisation", () => invoke("run_optimizer_cmd", { options, resume }));
   const savedTotal = report.processed.reduce((s, f) => s + (f.original_size - f.new_size), 0);
   document.getElementById("optResults").innerHTML = `
     <p><b>${report.processed.length}</b> fichier(s) réellement optimisé(s), espace gagné : <b>${humanSize(savedTotal)}</b>.</p>
+    ${report.resumed ? `<p class="subtitle">🛟 ${report.resumed} fichier(s) déjà traité(s) avant l'interruption ont été ignorés (les chiffres ci-dessus ne concernent que la reprise).</p>` : ""}
     ${report.unchanged.length ? `<p class="subtitle">${report.unchanged.length} fichier(s) déjà optimaux, laissés inchangés (le réencodage n'aurait fait que les agrandir).</p>` : ""}
     ${(report.notes || []).map((n) => `<p class="subtitle">ℹ️ ${escapeHtml(n)}</p>`).join("")}
     ${report.skipped.length ? `<p class="subtitle">${report.skipped.length} fichier(s) ignoré(s) (type non concerné).</p>` : ""}
@@ -356,7 +395,7 @@ document.getElementById("optRun").addEventListener("click", async () => {
       cleanBtn.remove();
     });
   }
-});
+}
 
 // =======================================================================
 // GETALL
@@ -372,11 +411,16 @@ document.getElementById("gaRun").addEventListener("click", async () => {
     mode: document.getElementById("gaMode").value,
     export_json_index: document.getElementById("gaJson").checked,
   };
-  const report = await runTask("GetALL", () => invoke("run_getall_cmd", { options }));
-  document.getElementById("gaResults").innerHTML = `
-    <p><b>${report.gathered.length}</b> fichier(s) rassemblé(s) dans <span class="path-cell">${escapeHtml(destination)}</span>.</p>
-    ${report.errors.length ? `<p style="color:var(--danger)">${report.errors.length} erreur(s).</p>` : ""}`;
+  await runGetAll(options, false);
 });
+
+async function runGetAll(options, resume) {
+  const report = await runTask(resume ? "Reprise de GetALL" : "GetALL", () => invoke("run_getall_cmd", { options, resume }));
+  document.getElementById("gaResults").innerHTML = `
+    <p><b>${report.gathered.length}</b> fichier(s) rassemblé(s) dans <span class="path-cell">${escapeHtml(options.destination)}</span>.</p>
+    ${report.resumed ? `<p class="subtitle">🛟 dont ${report.resumed} déjà rassemblé(s) avant l'interruption.</p>` : ""}
+    ${report.errors.length ? `<p style="color:var(--danger)">${report.errors.length} erreur(s).</p>` : ""}`;
+}
 
 // =======================================================================
 // TRIPHOTOSVIDEO
@@ -396,11 +440,16 @@ document.getElementById("smRun").addEventListener("click", async () => {
     separate_photos_videos: document.getElementById("smSeparate").checked,
     folder_prefix: document.getElementById("smPrefix").value || "",
   };
-  const report = await runTask("Tri", () => invoke("run_sort_media_cmd", { options }));
+  await runSortMedia(options, false);
+});
+
+async function runSortMedia(options, resume) {
+  const report = await runTask(resume ? "Reprise du tri" : "Tri", () => invoke("run_sort_media_cmd", { options, resume }));
   document.getElementById("smResults").innerHTML = `
     <p><b>${report.moved.length}</b> fichier(s) triés, <b>${report.duplicates_skipped}</b> doublon(s) ignoré(s), <b>${report.unclassified}</b> en NSP.</p>
+    ${report.resumed ? `<p class="subtitle">🛟 dont ${report.resumed} déjà traité(s) avant l'interruption.</p>` : ""}
     ${report.errors.length ? `<p style="color:var(--danger)">${report.errors.length} erreur(s).</p>` : ""}`;
-});
+}
 
 // =======================================================================
 // TAKEPHOTOONPHONE
@@ -502,3 +551,78 @@ document.getElementById("adbRun").addEventListener("click", async () => {
        <b>${report.duplicates_removed_locally}</b> doublon(s) supprimé(s) localement.</p>
     ${report.errors.length ? `<p style="color:var(--danger)">${report.errors.map(escapeHtml).join(" · ")}</p>` : ""}`;
 });
+
+
+// =======================================================================
+// CRASH RECOVERY: toggle + "operation interrupted" banner
+// =======================================================================
+const RESUME_LABELS = {
+  duplicates: { name: "Scan des doublons", tab: "duplicates" },
+  optimizer: { name: "Optimizer", tab: "optimizer" },
+  getall: { name: "GetALL", tab: "getall" },
+  sort_media: { name: "TriPhotosVideo", tab: "sortmedia" },
+};
+
+function showTab(tab) {
+  document.querySelector(`.tab-btn[data-tab="${tab}"]`)?.click();
+}
+
+async function resumeInterruptedRun(run) {
+  const info = RESUME_LABELS[run.tab];
+  if (!info) return;
+  showTab(info.tab);
+  const p = run.params;
+  if (run.tab === "duplicates") {
+    // Les hachages déjà calculés sont réutilisés : le scan repart presque instantanément.
+    await runDuplicatesScan(p.roots, p.options);
+  } else if (run.tab === "optimizer") {
+    await runOptimizer(p, true);
+  } else if (run.tab === "getall") {
+    await runGetAll(p, true);
+  } else if (run.tab === "sort_media") {
+    await runSortMedia(p, true);
+  }
+}
+
+async function refreshResumeBanner() {
+  const banner = document.getElementById("resumeBanner");
+  let runs = [];
+  try { runs = await invoke("list_unfinished_runs_cmd"); } catch (err) { console.warn(err); }
+  runs = runs.filter((r) => RESUME_LABELS[r.tab]);
+  if (!runs.length) { banner.style.display = "none"; banner.innerHTML = ""; return; }
+  banner.style.display = "block";
+  banner.innerHTML = `<b>⚠️ L'application s'est arrêtée pendant une opération.</b>` + runs.map((r, i) => `
+    <div class="resume-item">
+      <span>${escapeHtml(RESUME_LABELS[r.tab].name)} — démarrée le ${escapeHtml(r.started_at)}${r.done_count ? `, ${r.done_count} fichier(s) déjà traité(s)` : ""}.</span>
+      <span>
+        <button class="btn btn-primary btn-sm resume-go" data-i="${i}">▶ Reprendre</button>
+        <button class="btn btn-ghost btn-sm resume-drop" data-i="${i}">Ignorer</button>
+      </span>
+    </div>`).join("");
+  banner.onclick = async (e) => {
+    const go = e.target.closest(".resume-go");
+    const drop = e.target.closest(".resume-drop");
+    if (!go && !drop) return;
+    const run = runs[Number((go || drop).dataset.i)];
+    if (drop) {
+      if (!confirm("Oublier cette opération interrompue ? Elle ne pourra plus être reprise.")) return;
+      await invoke("discard_unfinished_run_cmd", { tab: run.tab });
+      return refreshResumeBanner();
+    }
+    banner.style.display = "none";
+    try { await resumeInterruptedRun(run); } finally { refreshResumeBanner(); }
+  };
+}
+
+(function initResume() {
+  const box = document.getElementById("resumeEnabled");
+  let enabled = true;
+  try { enabled = localStorage.getItem("ftp.resumeEnabled") !== "0"; } catch (_) {}
+  box.checked = enabled;
+  invoke("set_resume_enabled_cmd", { enabled }).catch(console.warn);
+  box.addEventListener("change", () => {
+    try { localStorage.setItem("ftp.resumeEnabled", box.checked ? "1" : "0"); } catch (_) {}
+    invoke("set_resume_enabled_cmd", { enabled: box.checked }).catch(console.warn);
+  });
+  refreshResumeBanner();
+})();
