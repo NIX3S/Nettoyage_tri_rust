@@ -150,25 +150,36 @@ pub fn silent_command(program: &str) -> Command {
 /// Returns `None` if neither has it, so the caller can report a clear
 /// `MissingTool` error instead of a cryptic "exited with 127".
 pub fn resolve_tool(name: &str) -> Option<PathBuf> {
+    resolve_tool_candidates(name).into_iter().next()
+}
+
+/// Every usable copy of a tool, best first: bundled layouts (newest layout
+/// first), then the system PATH. Callers that run the tool can fall through
+/// to the next copy when one crashes at startup — a stale file left by an
+/// older install (an installer upgrade doesn't delete files it no longer
+/// ships) must never shadow a good copy.
+pub fn resolve_tool_candidates(name: &str) -> Vec<PathBuf> {
     let exe_name = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let mut found: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let tools = dir.join("tools");
-            // Different vendoring scripts lay things out differently (a
-            // flat file, or the tool's own release folder copied wholesale
-            // so its DLLs travel with it — e.g. qpdf's "bin/" subfolder).
-            // Try the common shapes before giving up on the bundled copy.
+            // Current layout first (vendor-tools.ps1 copies the tool's whole
+            // release folder so its DLLs travel with it), then older flat
+            // layouts, which are the likeliest to be stale leftovers.
             let candidates = [
-                tools.join(&exe_name),                    // tools/qpdf.exe
                 tools.join(name).join("bin").join(&exe_name), // tools/qpdf/bin/qpdf.exe
-                tools.join(name).join(&exe_name),          // tools/qpdf/qpdf.exe
+                tools.join(name).join(&exe_name),             // tools/qpdf/qpdf.exe
+                tools.join(&exe_name),                        // tools/qpdf.exe
             ];
-            if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
-                return Some(found);
-            }
+            found.extend(candidates.into_iter().filter(|p| p.is_file()));
         }
     }
-
-    which::which(name).ok()
+    if let Ok(p) = which::which(name) {
+        if !found.contains(&p) {
+            found.push(p);
+        }
+    }
+    found
 }

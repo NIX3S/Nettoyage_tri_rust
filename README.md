@@ -52,7 +52,7 @@ Source : dossier ou fichier unique. Destination : un autre dossier, ou **réécr
 
 | Type | Traitement |
 |---|---|
-| Image | Ré-encodage PNG compression maximale (transparence) ou JPEG qualité 95 (photos), en Rust pur |
+| Image | Le format est détecté sur le **contenu** (un PNG nommé `.jpg` est géré correctement) et conservé : PNG recompressé au maximum, JPEG ré-encodé en qualité 95. GIF, WebP, BMP, TIFF sont laissés inchangés (animations préservées). Attention : le ré-encodage JPEG n'est pas bit-à-bit et ne conserve pas les métadonnées EXIF |
 | PPTX et variantes OOXML (`.pptx` `.ppsx` `.pptm` `.ppsm` `.potx` `.potm`) | Archive reconstruite : images de `ppt/media` ré-encodées (gardées telles quelles si le résultat n'est pas plus petit), le reste copié à l'identique en Deflate maximal. Texte et structure jamais touchés |
 | Anciens `.ppt` `.pps` `.pot` | Convertis en `.pptx` via LibreOffice (`soffice --headless`) puis optimisés |
 | `.eml` | Compression sans perte en `.eml.zip` (le contenu n'est jamais réécrit) |
@@ -62,7 +62,9 @@ Source : dossier ou fichier unique. Destination : un autre dossier, ou **réécr
 - Un résultat **plus gros** que l'original est ignoré : l'original est conservé et listé comme « inchangé ».
 - En mode sur place, l'original d'un `.eml` ou `.ppt/.pps` converti est retiré une fois le nouveau fichier produit (renommé `.bak` si l'option est cochée, sinon envoyé à la corbeille). Un bouton permet de **nettoyer les `.bak`** après validation.
 - Les fichiers de verrouillage Office (`~$...`) sont ignorés.
-- **Mode avec perte** (menu avancé) : un curseur qualité 0–100 pilote la qualité JPEG, le CRF vidéo et le preset PDF (`screen` / `ebook` / `printer`, via Ghostscript, à installer toi-même).
+- **Mode avec perte** (menu avancé) : un curseur qualité 0–100 pilote la qualité JPEG, la qualité vidéo et le preset PDF (`screen` / `ebook` / `printer`, via Ghostscript, à installer toi-même).
+  - **Sans Ghostscript** : les PDF sont traités sans perte avec qpdf, et une note l'indique dans le rapport.
+  - **Vidéo** : l'encodage H.264 (`libx264`) demande un ffmpeg complet. Le ffmpeg LGPL embarqué n'en a pas (erreur `0xbcb1ba08` = encodeur introuvable) : il bascule alors sur MPEG-4 pour mp4/mov/mkv/avi, moins efficace (les fichiers qui ne rétrécissent pas restent inchangés). Pour du vrai H.264, place un ffmpeg complet dans le dossier `tools/`.
 
 ### 📦 GetALL
 Un ou plusieurs dossiers source vers un dossier de sortie unique, à plat. Filtre par catégorie (Image / Vidéo / Audio / Document) et/ou extensions. Copy ou Cut. Option d'export `getall_index.json` associant chaque fichier à son chemin d'origine.
@@ -209,7 +211,8 @@ Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images
 |---|---|
 | « Aucun appareil détecté » | Téléphone en mode *transfert de fichiers*, débogage USB activé, et autorisation acceptée sur l'écran du téléphone (état `unauthorized`) |
 | Erreur ADB « No such file or directory » | Le dossier n'existe pas sur ce téléphone (ex. les captures sont parfois dans `DCIM/Screenshots`, pas `Pictures/Screenshots`) : corrige la ligne |
-| `qpdf` code `0xc0000139` (Windows) | DLL manquante ou version orpheline : relance `vendor-tools.ps1` (le build recopie le dossier `tools/` à neuf) ou installe qpdf avec `winget install QPDF.QPDF` |
+| `qpdf` code `0xc0000139` (Windows) | DLL manquante ou **ancien fichier resté dans `tools\`** après une mise à jour (un installeur ne supprime pas ce qu'il ne livre plus) : supprime le dossier `tools` de l'installation (ex. `%LOCALAPPDATA%\File Toolkit Pro\tools`) puis réinstalle. L'app essaie aussi automatiquement les autres copies (nouvelle disposition d'abord, puis PATH). Sinon relance `vendor-tools.ps1` (le build recopie le dossier `tools/` à neuf) ou installe qpdf avec `winget install QPDF.QPDF` |
+| Erreur ffmpeg `0xbcb1ba08` (mode avec perte) | Encodeur H.264 absent du ffmpeg embarqué (build LGPL) : voir la section Optimizer. Le mode sans perte (`-c copy`) n'est pas concerné |
 | `.ppt` / `.pps` : « soffice introuvable » | Installe LibreOffice (voir [Outils externes](#outils-externes)) |
 | « Invalid PNG signature » / « Could not find EOCD » | Le fichier est corrompu ou n'a pas le format de son extension ; il est listé en erreur et ignoré, le reste du lot continue |
 | Boutons inactifs | Vérifie que `src-tauri/capabilities/default.json` contient `core:event:default`, puis recompile |

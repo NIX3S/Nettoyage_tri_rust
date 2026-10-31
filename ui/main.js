@@ -340,6 +340,7 @@ document.getElementById("optRun").addEventListener("click", async () => {
   document.getElementById("optResults").innerHTML = `
     <p><b>${report.processed.length}</b> fichier(s) réellement optimisé(s), espace gagné : <b>${humanSize(savedTotal)}</b>.</p>
     ${report.unchanged.length ? `<p class="subtitle">${report.unchanged.length} fichier(s) déjà optimaux, laissés inchangés (le réencodage n'aurait fait que les agrandir).</p>` : ""}
+    ${(report.notes || []).map((n) => `<p class="subtitle">ℹ️ ${escapeHtml(n)}</p>`).join("")}
     ${report.skipped.length ? `<p class="subtitle">${report.skipped.length} fichier(s) ignoré(s) (type non concerné).</p>` : ""}
     ${report.errors.length ? `<p style="color:var(--danger)">${report.errors.length} erreur(s) : ${report.errors.map(escapeHtml).join(" · ")}</p>` : ""}
     ${report.backups_created.length ? `

@@ -13,7 +13,7 @@
 //!     falling back to PATH, and returns a clear `MissingTool` error rather
 //!     than failing silently if neither is found.
 
-use crate::fs_utils::{io_err, resolve_tool, silent_command, unique_destination};
+use crate::fs_utils::{io_err, resolve_tool, resolve_tool_candidates, silent_command, unique_destination};
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -62,6 +62,11 @@ pub struct OptimizeReport {
     /// UI can offer a one-click "delete all these now that I've checked the
     /// results" once the person has verified everything looks right.
     pub backups_created: Vec<PathBuf>,
+    /// Informational messages shown once per run (e.g. "Ghostscript absent:
+    /// PDFs were processed losslessly with qpdf instead"), so a missing
+    /// optional tool produces one clear note instead of one error per file.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,59 +167,71 @@ fn magic_bytes_hint(path: &Path) -> String {
     format!(" [premiers octets: {} — {detected}]", hex.join(" "))
 }
 
-fn optimize_image_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Result<()> {
-    let img = image::open(src).map_err(|e| crate::FtpError::Other(format!("{}: {e}{}", src.display(), magic_bytes_hint(src))))?;
+/// PNG at maximum compression. Used for every PNG source, so a `.png` file
+/// always keeps PNG content (alpha included) after optimization.
+fn encode_png_best<W: Write>(img: &image::DynamicImage, out: W) -> Result<(), String> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    img.write_with_encoder(PngEncoder::new_with_quality(out, CompressionType::Best, FilterType::Adaptive))
+        .map_err(|e| e.to_string())
+}
+
+fn encode_jpeg<W: Write>(img: &image::DynamicImage, out: W, quality: &Quality) -> Result<(), String> {
+    let q = match quality {
+        Quality::Lossless => 95,
+        Quality::Lossy(q) => (*q).clamp(1, 100),
+    };
+    let mut out = out;
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q);
+    encoder.encode_image(img).map_err(|e| e.to_string())
+}
+
+/// Optimizes one image file, keeping its REAL format: the format is detected
+/// from the file's content (not its extension), so a PNG saved as `.jpg` is
+/// decoded and re-saved as a PNG instead of failing — and a `.png` never ends
+/// up containing JPEG bytes. Returns `Ok(false)` when the format isn't one we
+/// can re-encode safely (GIF/WebP may be animated, BMP/TIFF gain nothing): no
+/// output is written and the caller treats the file as "unchanged".
+fn optimize_image_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Result<bool> {
+    let fail = |e: String| crate::FtpError::Other(format!("{}: {e}{}", src.display(), magic_bytes_hint(src)));
+    let reader = image::ImageReader::open(src)
+        .map_err(io_err(src))?
+        .with_guessed_format()
+        .map_err(io_err(src))?;
+    let format = reader.format();
+    if !matches!(format, Some(ImageFormat::Png) | Some(ImageFormat::Jpeg)) && format.is_some() {
+        return Ok(false);
+    }
+    let img = reader.decode().map_err(|e| fail(e.to_string()))?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(io_err(parent))?;
     }
-
-    let has_alpha = img.color().has_alpha();
-    match quality {
-        Quality::Lossless => {
-            if has_alpha {
-                img.save_with_format(dest, ImageFormat::Png)
-                    .map_err(|e| crate::FtpError::Other(e.to_string()))?;
-            } else {
-                let mut out = std::fs::File::create(dest).map_err(io_err(dest))?;
-                let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95);
-                encoder
-                    .encode_image(&img)
-                    .map_err(|e| crate::FtpError::Other(e.to_string()))?;
-            }
-        }
-        Quality::Lossy(q) => {
-            let mut out = std::fs::File::create(dest).map_err(io_err(dest))?;
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, (*q).clamp(1, 100));
-            encoder
-                .encode_image(&img)
-                .map_err(|e| crate::FtpError::Other(e.to_string()))?;
-        }
+    let out = std::fs::File::create(dest).map_err(io_err(dest))?;
+    let out = std::io::BufWriter::new(out);
+    let res = match format {
+        Some(ImageFormat::Png) => encode_png_best(&img, out),
+        _ => encode_jpeg(&img, out, quality),
+    };
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(dest);
+        return Err(crate::FtpError::Other(format!("{}: {e}", src.display())));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Re-encodes in-memory image bytes (used for images embedded inside a
-/// PPTX/zip, where we never want a loose temp file on disk). Returns `None`
-/// if the bytes aren't a format the `image` crate can decode, or if
-/// re-encoding didn't actually shrink anything — the caller then keeps the
-/// original bytes unchanged, which is always safe.
+/// PPTX/zip, where we never want a loose temp file on disk). The real format
+/// is detected from the bytes and preserved (PNG stays PNG, JPEG stays JPEG).
+/// Returns `None` if it's any other format, can't be decoded, or re-encoding
+/// didn't shrink anything — the caller then keeps the original bytes, which
+/// is always safe.
 fn optimize_image_bytes(bytes: &[u8], quality: &Quality) -> Option<Vec<u8>> {
-    let img = image::load_from_memory(bytes).ok()?;
+    let format = image::guess_format(bytes).ok()?;
+    let img = image::load_from_memory_with_format(bytes, format).ok()?;
     let mut out = Vec::new();
-    let has_alpha = img.color().has_alpha();
-    match quality {
-        Quality::Lossless if has_alpha => {
-            let mut cursor = std::io::Cursor::new(&mut out);
-            img.write_to(&mut cursor, ImageFormat::Png).ok()?;
-        }
-        Quality::Lossless => {
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95);
-            encoder.encode_image(&img).ok()?;
-        }
-        Quality::Lossy(q) => {
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, (*q).clamp(1, 100));
-            encoder.encode_image(&img).ok()?;
-        }
+    match format {
+        ImageFormat::Png => encode_png_best(&img, &mut out).ok()?,
+        ImageFormat::Jpeg => encode_jpeg(&img, &mut out, quality).ok()?,
+        _ => return None,
     }
     if out.len() < bytes.len() {
         Some(out)
@@ -223,36 +240,79 @@ fn optimize_image_bytes(bytes: &[u8], quality: &Quality) -> Option<Vec<u8>> {
     }
 }
 
-fn run_external(tool: &str, args: &[String], extra_success_codes: &[i32]) -> crate::Result<()> {
-    let tool_path = resolve_tool(tool).ok_or_else(|| crate::FtpError::MissingTool(tool.to_string()))?;
-    let mut cmd = silent_command(&tool_path.to_string_lossy());
-    // Force the tool's own folder as working directory. Note this does NOT
-    // control DLL search order priority on Windows (that's already led by
-    // the executable's own directory regardless of CWD) — it's just a
-    // reasonable default some CLI tools expect. Kept because it's harmless,
-    // not because it fixes DLL resolution.
-    if let Some(dir) = tool_path.parent() {
-        cmd.current_dir(dir);
-    }
-    let status = cmd
-        .args(args)
-        .status()
-        .map_err(|e| crate::FtpError::Other(format!("{tool} ({}) failed to start: {e}", tool_path.display())))?;
-    let ok = status.success() || status.code().is_some_and(|c| extra_success_codes.contains(&c));
-    if !ok {
-        // Always name the EXACT binary that was actually run — bundled
-        // tools/ copy vs a PATH-resolved one look identical in a bare
-        // "qpdf exited with ..." message, which cost real time to untangle
-        // when both existed on the same machine at once.
-        return Err(crate::FtpError::Other(format!(
-            "{tool} ({}) exited with {status}",
-            tool_path.display()
-        )));
-    }
-    Ok(())
+/// Windows loader failures (missing DLL / entry point not found / bad image):
+/// the executable never really ran, so trying another copy of the tool is
+/// safe and can't have half-processed anything.
+fn is_startup_failure(status: &std::process::ExitStatus) -> bool {
+    matches!(status.code().map(|c| c as u32), Some(0xC000_0139) | Some(0xC000_0135) | Some(0xC000_007B))
 }
 
-fn optimize_video_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Result<()> {
+fn run_external(tool: &str, args: &[String], extra_success_codes: &[i32]) -> crate::Result<()> {
+    let candidates = resolve_tool_candidates(tool);
+    if candidates.is_empty() {
+        return Err(crate::FtpError::MissingTool(tool.to_string()));
+    }
+    let mut last_err = None;
+    for tool_path in candidates {
+        let mut cmd = silent_command(&tool_path.to_string_lossy());
+        // The tool's own folder as working directory: harmless default some
+        // CLI tools expect. (It does NOT control DLL search order on Windows.)
+        if let Some(dir) = tool_path.parent() {
+            cmd.current_dir(dir);
+        }
+        let status = match cmd.args(args).status() {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = Some(format!("{tool} ({}) failed to start: {e}", tool_path.display()));
+                continue;
+            }
+        };
+        if status.success() || status.code().is_some_and(|c| extra_success_codes.contains(&c)) {
+            return Ok(());
+        }
+        // Always name the EXACT binary that was run — bundled vs PATH copies
+        // look identical in a bare "qpdf exited with ..." message.
+        last_err = Some(format!("{tool} ({}) exited with {status}", tool_path.display()));
+        if !is_startup_failure(&status) {
+            break; // a real tool error: another copy would fail the same way
+        }
+    }
+    Err(crate::FtpError::Other(last_err.unwrap_or_default()))
+}
+
+/// What the external tools can do on this machine, probed once per run.
+struct Caps {
+    gs: bool,
+    libx264: bool,
+}
+
+impl Caps {
+    fn detect(quality: &Quality, kind: MediaKind) -> Self {
+        let lossy = matches!(quality, Quality::Lossy(_));
+        let wants_video = matches!(kind, MediaKind::Video | MediaKind::All);
+        Caps {
+            gs: !lossy || resolve_tool("gs").is_some(),
+            libx264: !lossy || !wants_video || ffmpeg_has_encoder("libx264"),
+        }
+    }
+}
+
+/// Asks ffmpeg whether an encoder is compiled in. The bundled build is LGPL
+/// and has no libx264 (GPL), so lossy video must not blindly request it —
+/// that is what produced `AVERROR_ENCODER_NOT_FOUND` (exit 0xbcb1ba08).
+fn ffmpeg_has_encoder(name: &str) -> bool {
+    let Some(path) = resolve_tool("ffmpeg") else { return false };
+    let mut cmd = silent_command(&path.to_string_lossy());
+    if let Some(dir) = path.parent() {
+        cmd.current_dir(dir);
+    }
+    let Ok(out) = cmd.args(["-hide_banner", "-encoders"]).output() else { return false };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|l| l.split_whitespace().nth(1) == Some(name))
+}
+
+fn optimize_video_file(src: &Path, dest: &Path, quality: &Quality, caps: &Caps) -> crate::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(io_err(parent))?;
     }
@@ -260,7 +320,7 @@ fn optimize_video_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Res
     let src_str = src.to_string_lossy().to_string();
     let args: Vec<String> = match quality {
         Quality::Lossless => vec!["-y".into(), "-i".into(), src_str, "-c".into(), "copy".into(), dest_str],
-        Quality::Lossy(q) => {
+        Quality::Lossy(q) if caps.libx264 => {
             let crf = (51.0 - (*q as f64 / 100.0) * 51.0).round().clamp(0.0, 51.0) as u32;
             vec![
                 "-y".into(), "-i".into(), src_str,
@@ -269,11 +329,28 @@ fn optimize_video_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Res
                 dest_str,
             ]
         }
+        Quality::Lossy(q) => {
+            // No libx264 (LGPL build): fall back to ffmpeg's built-in MPEG-4
+            // encoder, available in every build. Audio is copied untouched.
+            let ext = dest.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if !matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "avi") {
+                return Err(crate::FtpError::Other(format!(
+                    "compression vidéo avec perte indisponible pour .{ext} : le ffmpeg embarqué n'a pas d'encodeur H.264"
+                )));
+            }
+            let qv = (31.0 - (*q as f64 / 100.0) * 29.0).round().clamp(2.0, 31.0) as u32;
+            vec![
+                "-y".into(), "-i".into(), src_str,
+                "-c:v".into(), "mpeg4".into(), "-q:v".into(), qv.to_string(),
+                "-c:a".into(), "copy".into(),
+                dest_str,
+            ]
+        }
     };
     run_external("ffmpeg", &args, &[])
 }
 
-fn optimize_pdf_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Result<()> {
+fn optimize_pdf_file(src: &Path, dest: &Path, quality: &Quality, caps: &Caps) -> crate::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(io_err(parent))?;
     }
@@ -282,12 +359,10 @@ fn optimize_pdf_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Resul
         // structural issues in the input PDF — that's a warning, not a
         // failure, and the output file is valid. Exit 2 (real errors) still
         // correctly fails.
-        Quality::Lossless => run_external(
-            "qpdf",
-            &["--compress-streams=y".into(), "--object-streams=generate".into(),
-              src.to_string_lossy().to_string(), dest.to_string_lossy().to_string()],
-            &[3],
-        ),
+        Quality::Lossless => run_qpdf(src, dest),
+        // Ghostscript missing: fall back to lossless qpdf (a note is added
+        // to the report once) instead of failing every single PDF.
+        Quality::Lossy(_) if !caps.gs => run_qpdf(src, dest),
         Quality::Lossy(q) => {
             let preset = if *q < 33 { "screen" } else if *q < 66 { "ebook" } else { "printer" };
             run_external(
@@ -299,6 +374,15 @@ fn optimize_pdf_file(src: &Path, dest: &Path, quality: &Quality) -> crate::Resul
             )
         }
     }
+}
+
+fn run_qpdf(src: &Path, dest: &Path) -> crate::Result<()> {
+    run_external(
+        "qpdf",
+        &["--compress-streams=y".into(), "--object-streams=generate".into(),
+          src.to_string_lossy().to_string(), dest.to_string_lossy().to_string()],
+        &[3],
+    )
 }
 
 /// PPTX is a zip archive. Every entry from the source archive is streamed
@@ -509,6 +593,9 @@ pub fn run_optimizer(
     let mut report = OptimizeReport::default();
     let in_place = opts.destination.is_none();
 
+    let caps = Caps::detect(&opts.quality, opts.kind);
+    let (mut note_gs, mut note_x264) = (false, false);
+
     let files = list_candidates(&opts.source, opts.kind);
     let total = files.len();
     on_progress(0, total, &opts.source);
@@ -610,17 +697,43 @@ pub fn run_optimizer(
             opts.kind
         };
 
-        let result = match effective_kind {
+        let lossy = matches!(opts.quality, Quality::Lossy(_));
+        if lossy && effective_kind == MediaKind::Pdf && !caps.gs && !note_gs {
+            note_gs = true;
+            report.notes.push(
+                "Ghostscript (gs) est introuvable : les PDF ont été traités sans perte avec qpdf. \
+                 Installe Ghostscript pour activer la compression PDF avec perte."
+                    .to_string(),
+            );
+        }
+        if lossy && effective_kind == MediaKind::Video && !caps.libx264 && !note_x264 {
+            note_x264 = true;
+            report.notes.push(
+                "Le ffmpeg utilisé n'a pas d'encodeur H.264 (build LGPL) : les vidéos mp4/mov/mkv/avi \
+                 sont recompressées en MPEG-4, moins efficace (les fichiers qui ne rétrécissent pas sont \
+                 laissés inchangés) ; webm/wmv/flv ne sont pas pris en charge. Pour une vraie compression \
+                 H.264, place un ffmpeg complet (avec libx264) dans le dossier tools."
+                    .to_string(),
+            );
+        }
+
+        let result: crate::Result<bool> = match effective_kind {
             MediaKind::Image => optimize_image_file(&src, &final_dest, &opts.quality),
-            MediaKind::Video => optimize_video_file(&src, &final_dest, &opts.quality),
-            MediaKind::Pdf => optimize_pdf_file(&src, &final_dest, &opts.quality),
-            MediaKind::Pptx => optimize_pptx_file(&src, &final_dest, &opts.quality),
+            MediaKind::Video => optimize_video_file(&src, &final_dest, &opts.quality, &caps).map(|_| true),
+            MediaKind::Pdf => optimize_pdf_file(&src, &final_dest, &opts.quality, &caps).map(|_| true),
+            MediaKind::Pptx => optimize_pptx_file(&src, &final_dest, &opts.quality).map(|_| true),
             MediaKind::All => unreachable!(),
         };
 
         match result {
-            Ok(()) => {
-                let new_size = std::fs::metadata(&final_dest).map(|m| m.len()).unwrap_or(0);
+            Ok(wrote) => {
+                // `wrote == false`: format deliberately not re-encoded
+                // (nothing was written) -> same path as "not smaller".
+                let new_size = if wrote {
+                    std::fs::metadata(&final_dest).map(|m| m.len()).unwrap_or(0)
+                } else {
+                    original_size
+                };
 
                 if new_size >= original_size && original_size > 0 {
                     // Re-encoding didn't actually help (common for JPEGs
@@ -682,4 +795,62 @@ pub fn run_optimizer(
     }
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_png(path: &Path) {
+        let img = image::RgbImage::from_fn(64, 64, |x, y| image::Rgb([(x * 4) as u8, (y * 4) as u8, 128]));
+        image::DynamicImage::ImageRgb8(img).save_with_format(path, ImageFormat::Png).unwrap();
+    }
+
+    #[test]
+    fn png_named_jpg_is_handled_by_content_and_stays_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("photo.jpg");
+        let dest = dir.path().join("out.jpg");
+        sample_png(&src);
+
+        let wrote = optimize_image_file(&src, &dest, &Quality::Lossless).unwrap();
+        assert!(wrote);
+        let bytes = std::fs::read(&dest).unwrap();
+        assert_eq!(image::guess_format(&bytes).unwrap(), ImageFormat::Png);
+    }
+
+    #[test]
+    fn png_never_turns_into_jpeg_even_in_lossy_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.png");
+        let dest = dir.path().join("b.png");
+        sample_png(&src);
+
+        optimize_image_file(&src, &dest, &Quality::Lossy(40)).unwrap();
+        let bytes = std::fs::read(&dest).unwrap();
+        assert_eq!(image::guess_format(&bytes).unwrap(), ImageFormat::Png);
+    }
+
+    #[test]
+    fn gif_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("anim.gif");
+        let dest = dir.path().join("out.gif");
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4));
+        img.save_with_format(&src, ImageFormat::Gif).unwrap();
+
+        assert!(!optimize_image_file(&src, &dest, &Quality::Lossless).unwrap());
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn embedded_bytes_keep_their_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.png");
+        sample_png(&p);
+        let bytes = std::fs::read(&p).unwrap();
+        if let Some(out) = optimize_image_bytes(&bytes, &Quality::Lossless) {
+            assert_eq!(image::guess_format(&out).unwrap(), ImageFormat::Png);
+        }
+    }
 }
